@@ -13,7 +13,11 @@ router.post('/register', async (req, res) => {
             [email, hashedPassword, username])
         res.json({ message: 'User created successfully!' })
     } catch (err) {
-        res.status(500).json({ error: 'Email already exists' })
+        if (err.code === '23505') {
+            res.status(400).json({ error: 'An account with that email already exists.' })
+        } else {
+            res.status(500).json({ error: 'Something went wrong.' })
+        }
     }
 })
 
@@ -23,15 +27,15 @@ router.post('/login', async (req, res) => {
     try {
         const result = await db.query('SELECT * FROM users WHERE email = $1', [email])
         const rows = result.rows
-        if (rows.length === 0) return res.status(400).json({ error: 'User not found' })
+        if (rows.length === 0) return res.status(400).json({ error: 'No account found with that email.' })
 
         const validPassword = await bcrypt.compare(password, rows[0].password_hash)
-        if (!validPassword) return res.status(400).json({ error: 'Wrong password' })
+        if (!validPassword) return res.status(400).json({ error: 'Incorrect password.' })
 
         const token = jwt.sign({ id: rows[0].id, username: rows[0].username }, process.env.SECRETEST_KEY)
         res.json({ token })
     } catch (err) {
-        res.status(500).json({ error: 'Something went wrong' })
+        res.status(500).json({ error: 'Something went wrong.' })
     }
 })
 
@@ -45,16 +49,16 @@ router.put('/change-password', async (req, res) => {
 
         const result = await db.query('SELECT * FROM users WHERE id = $1', [decoded.id])
         const rows = result.rows
-        if (rows.length === 0) return res.status(400).json({ error: 'User not found' })
+        if (rows.length === 0) return res.status(400).json({ error: 'User not found.' })
 
         const validPassword = await bcrypt.compare(currentPassword, rows[0].password_hash)
-        if (!validPassword) return res.status(400).json({ error: 'Current password is incorrect' })
+        if (!validPassword) return res.status(400).json({ error: 'Current password is incorrect.' })
 
         const hashedPassword = await bcrypt.hash(newPassword, 10)
         await db.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hashedPassword, decoded.id])
         res.json({ message: 'Password updated successfully!' })
     } catch (err) {
-        res.status(500).json({ error: 'Something went wrong' })
+        res.status(500).json({ error: 'Something went wrong.' })
     }
 })
 
