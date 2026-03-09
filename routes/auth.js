@@ -9,7 +9,7 @@ router.post('/register', async (req, res) => {
 
     try {
         const hashedPassword = await bcrypt.hash(password, 10)
-        await db.query('INSERT INTO users (email, password_hash, username) VALUES (?, ?, ?)',
+        await db.query('INSERT INTO users (email, password_hash, username) VALUES ($1, $2, $3)',
             [email, hashedPassword, username])
         res.json({ message: 'User created successfully!' })
     } catch (err) {
@@ -21,7 +21,8 @@ router.post('/login', async (req, res) => {
     const { email, password } = req.body
 
     try {
-        const [rows] = await db.query('SELECT * FROM users WHERE email = ?', [email])
+        const result = await db.query('SELECT * FROM users WHERE email = $1', [email])
+        const rows = result.rows
         if (rows.length === 0) return res.status(400).json({ error: 'User not found' })
 
         const validPassword = await bcrypt.compare(password, rows[0].password_hash)
@@ -42,14 +43,15 @@ router.put('/change-password', async (req, res) => {
         const decoded = jwt.verify(token, process.env.SECRETEST_KEY)
         const { currentPassword, newPassword } = req.body
 
-        const [rows] = await db.query('SELECT * FROM users WHERE id = ?', [decoded.id])
+        const result = await db.query('SELECT * FROM users WHERE id = $1', [decoded.id])
+        const rows = result.rows
         if (rows.length === 0) return res.status(400).json({ error: 'User not found' })
 
         const validPassword = await bcrypt.compare(currentPassword, rows[0].password_hash)
         if (!validPassword) return res.status(400).json({ error: 'Current password is incorrect' })
 
         const hashedPassword = await bcrypt.hash(newPassword, 10)
-        await db.query('UPDATE users SET password_hash = ? WHERE id = ?', [hashedPassword, decoded.id])
+        await db.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hashedPassword, decoded.id])
         res.json({ message: 'Password updated successfully!' })
     } catch (err) {
         res.status(500).json({ error: 'Something went wrong' })
