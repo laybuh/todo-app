@@ -79,8 +79,14 @@ router.post('/login', async (req, res) => {
         const rows = result.rows
         if (rows.length === 0) return res.status(400).json({ error: 'No account found with that email.' })
 
-        if (!rows[0].verified) return res.status(400).json({ error: 'Please verify your email before logging in.' })
-
+        if (!rows[0].verified) {
+            const oneHour = 1000 * 60 * 60
+            if (Date.now() - rows[0].created_at > oneHour) {
+                await db.query('DELETE FROM users WHERE id = $1', [rows[0].id])
+                return res.status(400).json({ error: 'No account found with that email.' })
+            }
+            return res.status(400).json({ error: 'Please verify your email before logging in.' })
+        }
         const validPassword = await bcrypt.compare(password, rows[0].password_hash)
         if (!validPassword) return res.status(400).json({ error: 'Incorrect password.' })
 
@@ -133,6 +139,71 @@ router.delete('/delete-account', async (req, res) => {
 
         await db.query('DELETE FROM users WHERE id = $1', [decoded.id])
         res.json({ message: 'Account deleted successfully.' })
+    } catch (err) {
+        res.status(500).json({ error: 'Something went wrong.' })
+    }
+})
+
+router.post('/forgot-password', async (req, res) => {
+    const { email } = req.body
+
+    try {
+        const result = await db.query('SELECT * FROM users WHERE email = $1', [email])
+        const rows = result.rows
+        if (rows.length === 0) return res.status(400).json({ error: 'No account found with that email.' })
+
+        const resetToken = crypto.randomBytes(32).toString('hex')
+        const expires = Date.now() + 1000 * 60 * 60
+
+        await db.query(
+            'UPDATE users SET forgot_password_token = $1, forgot_password_expires = $2 WHERE id = $3',
+            [resetToken, expires, rows[0].id]
+        )
+
+        const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`
+
+        await resend.emails.send({
+            from: 'noreply@layba.dev',
+            to: email,
+            subject: 'Reset your dospace password',
+            html: `
+                <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+                    <h2 style="font-weight: 600;">Reset your password.</h2>
+                    <p style="color: #555;">Click the button below to reset your password. This link expires in 1 hour.</p>
+                    <a href="${resetUrl}" style="display: inline-block; margin-top: 1rem; padding: 0.75rem 1.5rem; background: #4ecca3; color: #0f0f0f; text-decoration: none; border-radius: 6px; font-weight: 500;">Reset password</a>
+                    <p style="margin-top: 1.5rem; font-size: 0.8rem; color: #aaa;">If you didn't request this, you can ignore this email.</p>
+                </div>
+            `
+        })
+
+        res.json({ message: 'Password reset link sent! Please check your email.' })
+    } catch (err) {
+        res.status(500).json({ error: 'Something went wrong.' })
+    }
+})
+
+router.post('/reset-password', async (req, res) => {
+    const { token, newPassword } = req.body
+
+    const passwordError = validatePassword(newPassword)
+    if (passwordError) return res.status(400).json({ error: passwordError })
+
+    try {
+        const result = await db.query('SELECT * FROM users WHERE forgot_password_token = $1', [token])
+        const rows = result.rows
+        if (rows.length === 0) return res.status(400).json({ error: 'Invalid or expired reset link.' })
+
+        if (Date.now() > rows[0].forgot_password_expires) {
+            return res.status(400).json({ error: 'Reset link has expired. Please request a new one.' })
+        }
+
+        const hashedPassword = await bcrypt.hash(newPassword, 10)
+        await db.query(
+            'UPDATE users SET password_hash = $1, forgot_password_token = NULL, forgot_password_expires = NULL WHERE id = $2',
+            [hashedPassword, rows[0].id]
+        )
+
+        res.json({ message: 'Password reset successfully! You can now sign in.' })
     } catch (err) {
         res.status(500).json({ error: 'Something went wrong.' })
     }
