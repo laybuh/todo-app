@@ -4,8 +4,18 @@ const bcrypt = require('bcrypt')
 const jwt = require('jsonwebtoken')
 const db = require('../db')
 
+function validatePassword(password) {
+    if (password.length < 8) return 'Password must be at least 8 characters.'
+    if (!/[A-Z]/.test(password)) return 'Password must contain at least one capital letter.'
+    if (!/[!@#$%^&*()_+\-=\[\]{};\':"\\|,.<>\/?]/.test(password)) return 'Password must contain at least one symbol.'
+    return null
+}
+
 router.post('/register', async (req, res) => {
     const { username, email, password } = req.body
+
+    const passwordError = validatePassword(password)
+    if (passwordError) return res.status(400).json({ error: passwordError })
 
     try {
         const hashedPassword = await bcrypt.hash(password, 10)
@@ -46,6 +56,9 @@ router.put('/change-password', async (req, res) => {
     try {
         const decoded = jwt.verify(token, process.env.SECRETEST_KEY)
         const { currentPassword, newPassword } = req.body
+
+        const passwordError = validatePassword(newPassword)
+        if (passwordError) return res.status(400).json({ error: passwordError })
 
         const result = await db.query('SELECT * FROM users WHERE id = $1', [decoded.id])
         const rows = result.rows
