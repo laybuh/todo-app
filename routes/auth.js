@@ -75,4 +75,25 @@ router.put('/change-password', async (req, res) => {
     }
 })
 
+router.delete('/delete-account', async (req, res) => {
+    const token = req.headers['authorization']
+    if (!token) return res.status(401).json({ error: 'No token provided' })
+
+    try {
+        const decoded = jwt.verify(token, process.env.SECRETEST_KEY)
+        const { email } = req.body
+
+        const result = await db.query('SELECT * FROM users WHERE id = $1', [decoded.id])
+        const rows = result.rows
+        if (rows.length === 0) return res.status(400).json({ error: 'User not found.' })
+
+        if (rows[0].email !== email) return res.status(400).json({ error: 'Email does not match your account.' })
+
+        await db.query('DELETE FROM users WHERE id = $1', [decoded.id])
+        res.json({ message: 'Account deleted successfully.' })
+    } catch (err) {
+        res.status(500).json({ error: 'Something went wrong.' })
+    }
+})
+
 module.exports = router
