@@ -1,28 +1,16 @@
-const rateLimit = require('express-rate-limit')
 const express = require('express')
 const cors = require('cors')
 require('dotenv').config()
-
 
 const authRoutes = require('./routes/auth')
 const todoRoutes = require('./routes/todo')
 const db = require('./db')
 
 const app = express()
-app.set('trust proxy', 1)
 
 app.use(cors())
 app.use(express.json())
 
-const authLimiter = rateLimit({
-    windowMs: 10 * 60 * 1000,
-    max: 3,
-    message: { error: 'Too many attempts. Please try again in 10 minutes.' }
-})
-
-app.use('/auth/login', authLimiter)
-app.use('/auth/register', authLimiter)
-app.use('/auth/forgot-password', authLimiter)
 app.use('/auth', authRoutes)
 app.use('/todos', todoRoutes)
 
