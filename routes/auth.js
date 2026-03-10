@@ -32,7 +32,7 @@ router.post('/register', async (req, res) => {
         const verifyUrl = `${process.env.BACKEND_URL}/auth/verify-email?token=${verificationToken}`
 
         await resend.emails.send({
-            from: 'onboarding@resend.dev',
+            from: 'noreply@layba.dev',
             to: email,
             subject: 'Verify your dospace account',
             html: `
