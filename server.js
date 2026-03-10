@@ -1,6 +1,8 @@
+const rateLimit = require('express-rate-limit')
 const express = require('express')
 const cors = require('cors')
 require('dotenv').config()
+
 
 const authRoutes = require('./routes/auth')
 const todoRoutes = require('./routes/todo')
@@ -11,6 +13,15 @@ const app = express()
 app.use(cors())
 app.use(express.json())
 
+const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    message: { error: 'Too many attempts. Please try again in 15 minutes.' }
+})
+
+app.use('/auth/login', authLimiter)
+app.use('/auth/register', authLimiter)
+app.use('/auth/forgot-password', authLimiter)
 app.use('/auth', authRoutes)
 app.use('/todos', todoRoutes)
 
