@@ -44,4 +44,16 @@ router.post('/', verifyToken, async (req, res) => {
     res.json({ message: 'Mood saved.' })
 })
 
+// Delete a single check-in.
+router.delete('/:id', verifyToken, async (req, res) => {
+    await db.query('DELETE FROM moods WHERE id = $1 AND user_id = $2', [req.params.id, req.userId])
+    res.json({ message: 'Entry deleted.' })
+})
+
+// Erase the user's entire mood history.
+router.delete('/', verifyToken, async (req, res) => {
+    await db.query('DELETE FROM moods WHERE user_id = $1', [req.userId])
+    res.json({ message: 'Mood history cleared.' })
+})
+
 module.exports = router

@@ -58,8 +58,10 @@ router.post('/register', authLimiter, validateRegister, async (req, res) => {
         const verificationToken = crypto.randomBytes(32).toString('hex')
         const hashedPassword = await bcrypt.hash(password, 10)
         await db.query(
-            'INSERT INTO users (email, password_hash, username, verified, verification_token) VALUES ($1, $2, $3, $4, $5)',
-            [email, hashedPassword, username, false, hashToken(verificationToken)]
+            // Two-step verification is on by default for new accounts; users can
+            // turn it off in Settings.
+            'INSERT INTO users (email, password_hash, username, verified, verification_token, mfa_enabled) VALUES ($1, $2, $3, $4, $5, $6)',
+            [email, hashedPassword, username, false, hashToken(verificationToken), true]
         )
 
         const verifyUrl = `${process.env.BACKEND_URL}/auth/verify-email?token=${verificationToken}`
