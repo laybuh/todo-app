@@ -19,6 +19,11 @@ function sslConfig() {
   // CA cert) to verify the server certificate. Warn loudly if we ever run this
   // way in production so it doesn't go unnoticed.
   if (process.env.NODE_ENV === 'production') {
+    // Opt-in fail-closed: once DB_CA_CERT is configured, set DB_STRICT_SSL=true so
+    // a misconfigured deploy refuses to start rather than connect unverified.
+    if (process.env.DB_STRICT_SSL === 'true') {
+      throw new Error('[db] DB_STRICT_SSL is on but DB_CA_CERT is not set; refusing to connect with an unverified database certificate.')
+    }
     console.warn('[db] WARNING: TLS is on but the database certificate is NOT being verified. Set DB_CA_CERT to enable verification.')
   }
   return { rejectUnauthorized: false }
