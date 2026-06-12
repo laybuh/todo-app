@@ -10,8 +10,21 @@ const { validateRegister, validateLogin, validateEmailOnly } = require('../middl
 const { recordEvent, checkFailedLoginAnomaly, checkSignupSpike } = require('../security')
 const verifyToken = require('../middleware/verifyToken')
 const { signAccess, hashToken, startSession, clearRefreshCookie } = require('../tokens')
+const allowedOrigins = require('../allowedOrigins')
 
 const resend = new Resend(process.env.RESEND_API_KEY)
+
+// CSRF guard for cookie-authenticated endpoints. The refresh cookie is sent
+// cross-site (SameSite=None), so a malicious page could trigger these requests.
+// Browsers attach an Origin header on cross-site requests; require that it be a
+// known origin. A missing Origin (same-origin or non-browser clients) is allowed.
+function sameOrigin(req, res, next) {
+    const origin = req.headers.origin
+    if (origin && !allowedOrigins.includes(origin)) {
+        return res.status(403).json({ error: 'Origin not allowed.' })
+    }
+    next()
+}
 
 // Generate a 6-digit code, store it bcrypt-hashed with a 10-minute expiry
 // (replacing any prior code for the user), and email it. Used by login + resend.
@@ -151,7 +164,7 @@ router.post('/login', authLimiter, validateLogin, async (req, res) => {
 })
 
 // Rotate the refresh cookie and hand back a fresh access token. Detects reuse.
-router.post('/refresh', async (req, res) => {
+router.post('/refresh', sameOrigin, async (req, res) => {
     const raw = req.cookies?.refreshToken
     if (!raw) return res.status(401).json({ error: 'No active session.' })
 
@@ -191,7 +204,7 @@ router.post('/refresh', async (req, res) => {
 })
 
 // Revoke the current refresh token and clear the cookie.
-router.post('/logout', async (req, res) => {
+router.post('/logout', sameOrigin, async (req, res) => {
     const raw = req.cookies?.refreshToken
     if (raw) {
         await db.query('UPDATE refresh_tokens SET revoked = true WHERE token_hash = $1', [hashToken(raw)])
@@ -226,13 +239,21 @@ router.put('/change-password', verifyToken, async (req, res) => {
 
 router.delete('/delete-account', verifyToken, async (req, res) => {
     try {
-        const { email } = req.body
+        const { email, password } = req.body
 
         const result = await db.query('SELECT * FROM users WHERE id = $1', [req.userId])
         const rows = result.rows
         if (rows.length === 0) return res.status(400).json({ error: 'User not found.' })
 
         if (rows[0].email !== email) return res.status(400).json({ error: 'Email does not match your account.' })
+
+        // Require the password too, so a stolen or lingering access token can't
+        // delete the account on its own (mirrors the MFA-disable confirmation).
+        if (typeof password !== 'string' || !password) {
+            return res.status(400).json({ error: 'Please enter your password to confirm.' })
+        }
+        const validPassword = await bcrypt.compare(password, rows[0].password_hash)
+        if (!validPassword) return res.status(400).json({ error: 'Password is incorrect.' })
 
         // todos predate ON DELETE CASCADE, so remove them explicitly; the wellness
         // tables cascade automatically when the user row goes.

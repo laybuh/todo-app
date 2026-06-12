@@ -14,6 +14,13 @@ function sslConfig() {
   if (process.env.DB_SSL === 'false') {
     return false
   }
+  // Encrypted but unverified: fine for local dev, but in production this leaves
+  // the DB connection open to a man-in-the-middle. Set DB_CA_CERT (e.g. Render's
+  // CA cert) to verify the server certificate. Warn loudly if we ever run this
+  // way in production so it doesn't go unnoticed.
+  if (process.env.NODE_ENV === 'production') {
+    console.warn('[db] WARNING: TLS is on but the database certificate is NOT being verified. Set DB_CA_CERT to enable verification.')
+  }
   return { rejectUnauthorized: false }
 }
 

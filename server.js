@@ -12,6 +12,7 @@ const journalRoutes = require('./routes/journal')
 const moodRoutes = require('./routes/mood')
 const affirmationRoutes = require('./routes/affirmations')
 const { globalLimiter } = require('./middleware/rateLimiters')
+const allowedOrigins = require('./allowedOrigins')
 const db = require('./db')
 
 const app = express()
@@ -23,17 +24,8 @@ app.set('trust proxy', 1)
 // Security headers.
 app.use(helmet())
 
-// Lock CORS to known origins. Configure extra origins via ALLOWED_ORIGINS
-// (comma-separated). Requests with no Origin (curl, same-origin) are allowed.
-const allowedOrigins = [
-    process.env.FRONTEND_URL,
-    'https://lunev.vercel.app',
-    'https://dospace.vercel.app',
-    'http://localhost:5173',
-    'http://localhost:3000',
-    ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',').map((s) => s.trim()) : []),
-].filter(Boolean)
-
+// Lock CORS to known origins (see allowedOrigins.js). Requests with no Origin
+// (curl, same-origin) are allowed.
 app.use(cors({
     origin(origin, callback) {
         if (!origin || allowedOrigins.includes(origin)) return callback(null, true)
