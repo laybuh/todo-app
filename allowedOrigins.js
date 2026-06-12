@@ -3,6 +3,8 @@
 // (comma-separated).
 const allowedOrigins = [
     process.env.FRONTEND_URL,
+    'https://lunev.app',
+    'https://www.lunev.app',
     'https://lunev.vercel.app',
     'https://dospace.vercel.app',
     'http://localhost:5173',
