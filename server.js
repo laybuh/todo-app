@@ -75,6 +75,27 @@ async function setupDatabase() {
     await db.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now()`)
     await db.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarded boolean DEFAULT false`)
     await db.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_enabled boolean DEFAULT false`)
+    await db.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_expires timestamptz`)
+
+    // Heal a schema drift that bit us in production: on older databases
+    // users.created_at exists as a bigint (epoch ms) from the original todo app,
+    // so `created_at > now() - interval` threw `operator does not exist:
+    // bigint > timestamp`. Convert it to a real timestamptz once. Idempotent —
+    // the block only runs while the column is still bigint.
+    await db.query(`
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'users' AND column_name = 'created_at' AND data_type = 'bigint'
+            ) THEN
+                ALTER TABLE users ALTER COLUMN created_at DROP DEFAULT;
+                ALTER TABLE users ALTER COLUMN created_at TYPE timestamptz
+                    USING to_timestamp(created_at::double precision / 1000.0);
+                ALTER TABLE users ALTER COLUMN created_at SET DEFAULT now();
+            END IF;
+        END $$;
+    `)
 
     await db.query(`
         CREATE TABLE IF NOT EXISTS todos (
@@ -170,10 +191,35 @@ async function setupDatabase() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_security_events_type_time ON security_events (type, created_at)`)
 
     console.log('Database tables ready!')
+
+    // Defense in depth: if a column type ever drifts from what our SQL assumes,
+    // say so loudly at boot instead of failing on some random request later.
+    const drift = await db.query(
+        `SELECT data_type FROM information_schema.columns
+         WHERE table_name = 'users' AND column_name = 'created_at'`
+    )
+    if (drift.rows[0] && drift.rows[0].data_type !== 'timestamp with time zone') {
+        console.warn(`[schema] WARNING: users.created_at is '${drift.rows[0].data_type}', expected timestamptz.`)
+    }
+}
+
+// Sweep away accounts that signed up but never verified within 48 hours. Runs at
+// boot and periodically — quietly, so a real user is never deleted mid-login.
+async function cleanupAbandonedSignups() {
+    try {
+        const { rowCount } = await db.query(
+            `DELETE FROM users WHERE verified = false AND created_at < now() - interval '48 hours'`
+        )
+        if (rowCount) console.log(`[cleanup] removed ${rowCount} abandoned unverified account(s)`)
+    } catch (err) {
+        console.error('[cleanup] abandoned-signup sweep error:', err.message)
+    }
 }
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, async () => {
     console.log(`Server running on port ${PORT}`)
     await setupDatabase()
+    await cleanupAbandonedSignups()
+    setInterval(cleanupAbandonedSignups, 6 * 60 * 60 * 1000)
 })

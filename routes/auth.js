@@ -61,6 +61,35 @@ function validatePassword(password) {
     return null
 }
 
+const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000 // verification links stay valid for 24 hours
+
+// Issue a fresh verification token for a user, store its hash + expiry, and email
+// the link. Shared by registration and the resend endpoint so the two can never
+// drift apart.
+async function sendVerificationEmail(userId, email) {
+    const verificationToken = crypto.randomBytes(32).toString('hex')
+    const expires = new Date(Date.now() + VERIFICATION_TTL_MS)
+    await db.query(
+        'UPDATE users SET verification_token = $1, verification_expires = $2 WHERE id = $3',
+        [hashToken(verificationToken), expires, userId]
+    )
+
+    const verifyUrl = `${process.env.BACKEND_URL}/auth/verify-email?token=${verificationToken}`
+    await resend.emails.send({
+        from: 'noreply@layba.dev',
+        to: email,
+        subject: 'Verify your lunev account',
+        html: `
+            <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+                <h2 style="font-weight: 600;">Welcome to lunev.</h2>
+                <p style="color: #555;">Click the button below to verify your email address. This link is valid for 24 hours.</p>
+                <a href="${verifyUrl}" style="display: inline-block; margin-top: 1rem; padding: 0.75rem 1.5rem; background: #4ecca3; color: #0f0f0f; text-decoration: none; border-radius: 6px; font-weight: 500;">Verify email</a>
+                <p style="margin-top: 1.5rem; font-size: 0.8rem; color: #aaa;">If you didn't create an account, you can ignore this email.</p>
+            </div>
+        `
+    })
+}
+
 router.post('/register', authLimiter, validateRegister, async (req, res) => {
     const { username, email, password } = req.body
 
@@ -68,30 +97,15 @@ router.post('/register', authLimiter, validateRegister, async (req, res) => {
     if (passwordError) return res.status(400).json({ error: passwordError })
 
     try {
-        const verificationToken = crypto.randomBytes(32).toString('hex')
         const hashedPassword = await bcrypt.hash(password, 10)
-        await db.query(
-            // Two-step verification is on by default for new accounts; users can
-            // turn it off in Settings.
-            'INSERT INTO users (email, password_hash, username, verified, verification_token, mfa_enabled) VALUES ($1, $2, $3, $4, $5, $6)',
-            [email, hashedPassword, username, false, hashToken(verificationToken), true]
+        // Two-step verification is on by default for new accounts; users can
+        // turn it off in Settings.
+        const insert = await db.query(
+            'INSERT INTO users (email, password_hash, username, verified, mfa_enabled) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+            [email, hashedPassword, username, false, true]
         )
 
-        const verifyUrl = `${process.env.BACKEND_URL}/auth/verify-email?token=${verificationToken}`
-
-        await resend.emails.send({
-            from: 'noreply@layba.dev',
-            to: email,
-            subject: 'Verify your lunev account',
-            html: `
-                <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
-                    <h2 style="font-weight: 600;">Welcome to lunev.</h2>
-                    <p style="color: #555;">Click the button below to verify your email address.</p>
-                    <a href="${verifyUrl}" style="display: inline-block; margin-top: 1rem; padding: 0.75rem 1.5rem; background: #4ecca3; color: #0f0f0f; text-decoration: none; border-radius: 6px; font-weight: 500;">Verify email</a>
-                    <p style="margin-top: 1.5rem; font-size: 0.8rem; color: #aaa;">If you didn't create an account, you can ignore this email.</p>
-                </div>
-            `
-        })
+        await sendVerificationEmail(insert.rows[0].id, email)
 
         checkSignupSpike()
         res.json({ message: 'Account created! Please check your email to verify your account.' })
@@ -104,19 +118,57 @@ router.post('/register', authLimiter, validateRegister, async (req, res) => {
     }
 })
 
+// Verify an email link. Deliberately idempotent: mail providers (Gmail, Outlook
+// Safe Links) pre-fetch links to scan them, which would otherwise consume a
+// one-time token before the human ever clicks it. So we key success off the
+// `verified` flag, never delete the token on use, and always bounce back to the
+// branded frontend with a status the login page can explain — instead of a bare
+// error page on the API host.
 router.get('/verify-email', async (req, res) => {
     const { token } = req.query
-    if (!token) return res.status(400).send('Invalid verification link.')
+    const loginUrl = `${process.env.FRONTEND_URL}/login`
+    if (!token) return res.redirect(`${loginUrl}?verifyError=invalid`)
 
     try {
-        const result = await db.query('SELECT * FROM users WHERE verification_token = $1', [hashToken(token)])
-        const rows = result.rows
-        if (rows.length === 0) return res.status(400).send('Invalid or expired verification link.')
+        const result = await db.query(
+            'SELECT id, verified, verification_expires FROM users WHERE verification_token = $1',
+            [hashToken(token)]
+        )
+        const user = result.rows[0]
 
-        await db.query('UPDATE users SET verified = true, verification_token = NULL WHERE id = $1', [rows[0].id])
-        res.redirect(`${process.env.FRONTEND_URL}/login?verified=true`)
+        // No match: an old link whose account was deleted, or a wrong/garbled token.
+        if (!user) return res.redirect(`${loginUrl}?verifyError=invalid`)
+
+        // Already verified (scanner pre-clicked, or the user clicked twice). Succeed.
+        if (user.verified) return res.redirect(`${loginUrl}?verified=true`)
+
+        // Genuinely past its 24h window and still unverified — offer a resend.
+        if (user.verification_expires && new Date(user.verification_expires).getTime() < Date.now()) {
+            return res.redirect(`${loginUrl}?verifyError=expired`)
+        }
+
+        await db.query('UPDATE users SET verified = true WHERE id = $1', [user.id])
+        res.redirect(`${loginUrl}?verified=true`)
     } catch (err) {
-        res.status(500).send('Something went wrong.')
+        res.redirect(`${loginUrl}?verifyError=server`)
+    }
+})
+
+// Resend a verification link. Always responds the same way whether or not the
+// email exists or is already verified, so it can't be used to probe for accounts.
+router.post('/resend-verification', authLimiter, validateEmailOnly, async (req, res) => {
+    const { email } = req.body
+    const generic = { message: 'If that account still needs verifying, a new link is on its way.' }
+
+    try {
+        const result = await db.query('SELECT id, verified FROM users WHERE email = $1', [email])
+        const user = result.rows[0]
+        if (user && !user.verified) {
+            await sendVerificationEmail(user.id, email)
+        }
+        res.json(generic)
+    } catch (err) {
+        res.status(500).json({ error: 'Something went wrong.' })
     }
 })
 
@@ -136,13 +188,15 @@ router.post('/login', authLimiter, validateLogin, async (req, res) => {
             return res.status(400).json({ error: 'Invalid email or password.' })
         }
 
+        // Unverified: never delete the account mid-login (that surprised real
+        // users whose mail client ate the link). Block the sign-in and let the
+        // frontend offer a one-click resend. Abandoned accounts are swept by a
+        // background job in server.js instead.
         if (!rows[0].verified) {
-            const oneHour = 1000 * 60 * 60
-            if (Date.now() - rows[0].created_at > oneHour) {
-                await db.query('DELETE FROM users WHERE id = $1', [rows[0].id])
-                return res.status(400).json({ error: 'No account found with that email.' })
-            }
-            return res.status(400).json({ error: 'Please verify your email before logging in.' })
+            return res.status(400).json({
+                error: 'Please verify your email before signing in.',
+                unverified: true,
+            })
         }
         const validPassword = await bcrypt.compare(password, rows[0].password_hash)
         if (!validPassword) {
