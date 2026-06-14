@@ -1,2 +1,6 @@
 node_modules
 .env
+
+# personal/local-only — never pushed
+NOTES.md
+test-fix.js
