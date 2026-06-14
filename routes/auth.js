@@ -105,7 +105,15 @@ router.post('/register', authLimiter, validateRegister, async (req, res) => {
             [email, hashedPassword, username, false, true]
         )
 
-        await sendVerificationEmail(insert.rows[0].id, email)
+        // If the email fails to send, roll the account back so the address is
+        // free to register again immediately — otherwise the user is stuck with
+        // an account they can't verify and can't re-create.
+        try {
+            await sendVerificationEmail(insert.rows[0].id, email)
+        } catch (mailErr) {
+            await db.query('DELETE FROM users WHERE id = $1', [insert.rows[0].id])
+            return res.status(500).json({ error: "We couldn't send the verification email. Please try again." })
+        }
 
         checkSignupSpike()
         res.json({ message: 'Account created! Please check your email to verify your account.' })
@@ -142,8 +150,11 @@ router.get('/verify-email', async (req, res) => {
         // Already verified (scanner pre-clicked, or the user clicked twice). Succeed.
         if (user.verified) return res.redirect(`${loginUrl}?verified=true`)
 
-        // Genuinely past its 24h window and still unverified — offer a resend.
-        if (user.verification_expires && new Date(user.verification_expires).getTime() < Date.now()) {
+        // Expired, or a stale token with no recorded expiry (e.g. a legacy
+        // account from before expiries were tracked) — never auto-verify it;
+        // make the user request a fresh link.
+        const expiresAt = user.verification_expires && new Date(user.verification_expires).getTime()
+        if (!expiresAt || expiresAt < Date.now()) {
             return res.redirect(`${loginUrl}?verifyError=expired`)
         }
 
@@ -158,7 +169,11 @@ router.get('/verify-email', async (req, res) => {
 // email exists or is already verified, so it can't be used to probe for accounts.
 router.post('/resend-verification', authLimiter, validateEmailOnly, async (req, res) => {
     const { email } = req.body
-    const generic = { message: 'If that account still needs verifying, a new link is on its way.' }
+
+    // Reply the same way, at the same speed, in every case. The lookup + email
+    // happen after the response so an attacker can't time the request to tell
+    // whether an account exists or is already verified.
+    res.json({ message: 'If that account still needs verifying, a new link is on its way.' })
 
     try {
         const result = await db.query('SELECT id, verified FROM users WHERE email = $1', [email])
@@ -166,9 +181,8 @@ router.post('/resend-verification', authLimiter, validateEmailOnly, async (req, 
         if (user && !user.verified) {
             await sendVerificationEmail(user.id, email)
         }
-        res.json(generic)
     } catch (err) {
-        res.status(500).json({ error: 'Something went wrong.' })
+        console.error('[resend-verification] error:', err.message)
     }
 })
 
