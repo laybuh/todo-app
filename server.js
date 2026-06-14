@@ -100,7 +100,7 @@ async function setupDatabase() {
     await db.query(`
         CREATE TABLE IF NOT EXISTS todos (
             id SERIAL PRIMARY KEY,
-            user_id INTEGER REFERENCES users(id),
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
             title TEXT NOT NULL,
             completed BOOLEAN DEFAULT false
         )
@@ -108,6 +108,28 @@ async function setupDatabase() {
     // Phase 2: optional energy tag (low/medium/high) and time-capsule unlock date.
     await db.query(`ALTER TABLE todos ADD COLUMN IF NOT EXISTS energy text`)
     await db.query(`ALTER TABLE todos ADD COLUMN IF NOT EXISTS unlock_date timestamptz`)
+
+    // Older databases created the todos.user_id foreign key WITHOUT ON DELETE
+    // CASCADE (every sibling table has it). Without it, deleting a user that owns
+    // any todo fails with a FK violation, which breaks both account deletion and
+    // the abandoned-signup sweep. Re-create the constraint with CASCADE once.
+    // Idempotent — only runs while the cascade rule is still missing.
+    await db.query(`
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM information_schema.referential_constraints rc
+                JOIN information_schema.table_constraints tc
+                    ON rc.constraint_name = tc.constraint_name
+                WHERE tc.table_name = 'todos' AND rc.delete_rule = 'CASCADE'
+            ) THEN
+                ALTER TABLE todos DROP CONSTRAINT IF EXISTS todos_user_id_fkey;
+                ALTER TABLE todos ADD CONSTRAINT todos_user_id_fkey
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+            END IF;
+        END $$;
+    `)
 
     // Phase 3 wellness tables. All user content columns (content, note, text)
     // are AES-256 encrypted at rest. ON DELETE CASCADE so account deletion is clean.
@@ -205,10 +227,19 @@ async function setupDatabase() {
 
 // Sweep away accounts that signed up but never verified within 48 hours. Runs at
 // boot and periodically — quietly, so a real user is never deleted mid-login.
+//
+// The `verification_expires IS NOT NULL` guard is critical: it is only set by the
+// new registration flow, so it cleanly distinguishes a genuine abandoned signup
+// from a legacy todo-app account that was backfilled to verified=false when the
+// `verified` column was first added. Without it, this sweep would delete real
+// original users.
 async function cleanupAbandonedSignups() {
     try {
         const { rowCount } = await db.query(
-            `DELETE FROM users WHERE verified = false AND created_at < now() - interval '48 hours'`
+            `DELETE FROM users
+             WHERE verified = false
+               AND verification_expires IS NOT NULL
+               AND created_at < now() - interval '48 hours'`
         )
         if (rowCount) console.log(`[cleanup] removed ${rowCount} abandoned unverified account(s)`)
     } catch (err) {
