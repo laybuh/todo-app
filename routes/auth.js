@@ -14,6 +14,18 @@ const allowedOrigins = require('../allowedOrigins')
 
 const resend = new Resend(process.env.RESEND_API_KEY)
 
+// Resend's SDK resolves with { data, error } instead of throwing on API-level
+// failures (unverified domain, rate limit, bad recipient, suspended account...).
+// Unwrap it so a failed send actually throws and the caller's error handling
+// fires — otherwise a dropped email looks like success and the user silently
+// never receives their code or link.
+async function sendEmail(message) {
+    const { error } = await resend.emails.send(message)
+    if (error) {
+        throw new Error(`Email send failed: ${error.message || error.name || 'unknown error'}`)
+    }
+}
+
 // CSRF guard for cookie-authenticated endpoints. The refresh cookie is sent
 // cross-site (SameSite=None), so a malicious page could trigger these requests.
 // Browsers attach an Origin header on cross-site requests; require that it be a
@@ -39,7 +51,7 @@ async function issueOtp(user) {
         [user.id, codeHash, expiresAt]
     )
 
-    await resend.emails.send({
+    await sendEmail({
         from: 'lunev <noreply@layba.dev>',
         to: user.email,
         subject: 'Your lunev sign-in code',
@@ -75,7 +87,7 @@ async function sendVerificationEmail(userId, email) {
     )
 
     const verifyUrl = `${process.env.BACKEND_URL}/auth/verify-email?token=${verificationToken}`
-    await resend.emails.send({
+    await sendEmail({
         from: 'noreply@layba.dev',
         to: email,
         subject: 'Verify your lunev account',
@@ -219,8 +231,18 @@ router.post('/login', authLimiter, validateLogin, async (req, res) => {
         }
 
         // MFA on: don't issue a token yet — email a code and ask for it.
+        // Clear any refresh cookie this browser is still carrying from a prior
+        // session, so a failed (or abandoned) code can't be bypassed by silently
+        // restoring the old session via /auth/refresh. A fresh cookie is only
+        // issued once the code is verified. Only affects this browser; other
+        // devices' sessions are untouched.
         if (rows[0].mfa_enabled) {
-            await issueOtp(rows[0])
+            clearRefreshCookie(req, res)
+            try {
+                await issueOtp(rows[0])
+            } catch (mailErr) {
+                return res.status(500).json({ error: "We couldn't send your sign-in code. Please try again." })
+            }
             return res.json({ mfaRequired: true, email: rows[0].email })
         }
 
@@ -355,7 +377,7 @@ router.post('/forgot-password', authLimiter, validateEmailOnly, async (req, res)
 
         const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`
 
-        await resend.emails.send({
+        await sendEmail({
             from: 'noreply@layba.dev',
             to: email,
             subject: 'Reset your lunev password',
