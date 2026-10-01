@@ -35,7 +35,11 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
   port: process.env.DB_PORT || 5432,
-  ssl: sslConfig()
+  ssl: sslConfig(),
+  // Serverless runs many small instances, so keep each pool small and let the
+  // Supabase pooler do the real pooling. Override with DB_POOL_MAX locally.
+  max: Number(process.env.DB_POOL_MAX) || 3,
+  idleTimeoutMillis: 10000
 })
 
 module.exports = pool

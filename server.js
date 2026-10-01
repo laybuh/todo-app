@@ -3,6 +3,7 @@ const cors = require('cors')
 const helmet = require('helmet')
 const morgan = require('morgan')
 const cookieParser = require('cookie-parser')
+const crypto = require('crypto')
 require('dotenv').config()
 
 const authRoutes = require('./routes/auth')
@@ -11,7 +12,7 @@ const adminRoutes = require('./routes/admin')
 const journalRoutes = require('./routes/journal')
 const moodRoutes = require('./routes/mood')
 const affirmationRoutes = require('./routes/affirmations')
-const { globalLimiter } = require('./middleware/rateLimiters')
+const { globalLimiter, purgeExpiredRateLimits } = require('./middleware/rateLimiters')
 const allowedOrigins = require('./allowedOrigins')
 const db = require('./db')
 
@@ -54,6 +55,26 @@ app.use('/affirmations', affirmationRoutes)
 
 app.get('/', (req, res) => {
     res.json({ message: 'Server is running!' })
+})
+
+// Lightweight uptime check. Touches no user data.
+app.get('/health', (req, res) => {
+    res.json({ ok: true })
+})
+
+// Daily housekeeping, triggered by Vercel Cron (see vercel.json). Vercel sends
+// CRON_SECRET as a bearer token; compared in constant time like adminAuth.
+app.get('/cron/cleanup', async (req, res) => {
+    const secret = process.env.CRON_SECRET
+    if (!secret) return res.status(500).json({ error: 'Cron is not configured.' })
+    const a = Buffer.from(req.headers.authorization || '')
+    const b = Buffer.from(`Bearer ${secret}`)
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+        return res.status(401).json({ error: 'Unauthorized.' })
+    }
+    await cleanupAbandonedSignups()
+    await purgeExpiredRateLimits()
+    res.json({ ok: true })
 })
 
 async function setupDatabase() {
@@ -212,6 +233,16 @@ async function setupDatabase() {
     `)
     await db.query(`CREATE INDEX IF NOT EXISTS idx_security_events_type_time ON security_events (type, created_at)`)
 
+    // Shared rate-limit counters. On serverless every instance has its own memory,
+    // so auth limits must live in the DB to actually hold. Keys are hashed IPs.
+    await db.query(`
+        CREATE TABLE IF NOT EXISTS rate_limits (
+            key TEXT PRIMARY KEY,
+            hits INTEGER NOT NULL,
+            reset_at timestamptz NOT NULL
+        )
+    `)
+
     console.log('Database tables ready!')
 
     // Defense in depth: if a column type ever drifts from what our SQL assumes,
@@ -247,10 +278,16 @@ async function cleanupAbandonedSignups() {
     }
 }
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, async () => {
-    console.log(`Server running on port ${PORT}`)
-    await setupDatabase()
-    await cleanupAbandonedSignups()
-    setInterval(cleanupAbandonedSignups, 6 * 60 * 60 * 1000)
-})
+module.exports = { app, setupDatabase, cleanupAbandonedSignups }
+
+// Long-running mode (local dev). On Vercel the app is imported by api/index.js
+// instead, schema changes run via `npm run db:setup`, and cleanup runs on cron.
+if (require.main === module) {
+    const PORT = process.env.PORT || 5000
+    app.listen(PORT, async () => {
+        console.log(`Server running on port ${PORT}`)
+        await setupDatabase()
+        await cleanupAbandonedSignups()
+        setInterval(cleanupAbandonedSignups, 6 * 60 * 60 * 1000)
+    })
+}
