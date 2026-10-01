@@ -18,7 +18,7 @@ const db = require('./db')
 
 const app = express()
 
-// Render (and most hosts) sit behind a proxy — needed for correct client IPs
+// Vercel (and most hosts) sit behind a proxy — needed for correct client IPs
 // in rate limiting and security logging.
 app.set('trust proxy', 1)
 
@@ -36,8 +36,10 @@ app.use(cors({
 }))
 
 // Request logging — method, path, status, timing only. Never logs request
-// bodies, so passwords and encrypted user content stay out of logs (privacy).
-app.use(morgan('tiny'))
+// bodies or query strings, so passwords, one-time tokens in links, and
+// encrypted user content stay out of logs (privacy).
+morgan.token('path', (req) => req.originalUrl.split('?')[0])
+app.use(morgan(':method :path :status :res[content-length] - :response-time ms'))
 
 // Cap body size to blunt large-payload abuse.
 app.use(express.json({ limit: '64kb' }))
